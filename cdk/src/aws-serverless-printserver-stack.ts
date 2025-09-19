@@ -13,7 +13,7 @@ export class AwsServerlessPrintserverStack extends cdk.Stack {
     // S3 Bucket for print files
     const printBucket = new s3.Bucket(this, 'PrintFilesBucket', {
       bucketName: `printserver-${this.account}-${this.region}`,
-      removalPolicy: cdk.RemovalPolicy.RETAIN, // Keep bucket on stack deletion
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // Delete bucket on stack deletion
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       lifecycleRules: [
