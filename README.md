@@ -8,7 +8,7 @@ The serverless architecture makes it scalable and hosting costs (your AWS bill) 
 
 ## How It Works
 
-After files is uploaded to the S3 bucket, an instant notification is sent to the client's SQS queue. The client then downloads the file and prints it to the printer.
+After a file is uploaded to the S3 bucket, an instant notification is sent to the client's SQS queue. The client then downloads the file and prints it to the printer.
 
 The local client uses CUPS to discover, register and print to printers in the local network.
 
