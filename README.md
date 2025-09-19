@@ -22,7 +22,14 @@ Some printer features such as variable label lengths with automatic cutting on t
 
 ## Getting Started
 
-### 1) Deploy infrastructure
+### 1) Clone the repository
+
+```bash
+git clone git@github.com:stromhalm/aws-serverless-print-server.git
+cd aws-serverless-print-server
+```
+
+### 2) Deploy infrastructure
 
 ```bash
 cd cdk
@@ -35,14 +42,14 @@ cdk deploy --context fileRetentionHours=168
 
 After deployment, note the CloudFormation output `PrintBucketName` (bucket name is `printserver-<account>-<region>`).
 
-### 2) Install the client
+### 3) Install the client
 
 ```bash
 cd client
 npm install
 ```
 
-### 3) Configure environment
+### 4) Configure environment
 
 Create `client/.env` (or a `.env` in the repo root). The client loads either automatically.
 
@@ -63,7 +70,7 @@ CLIENT_ID=warehouse1
 # TEST_MODE=true
 ```
 
-### 4) Register the client (one-time)
+### 5) Register the client (one-time)
 
 This creates the SQS queue `printserver-<clientId>` and configures S3 notifications for `clients/<clientId>/`. Requires AWS permissions to create queues and update bucket notifications.
 
@@ -72,7 +79,7 @@ This creates the SQS queue `printserver-<clientId>` and configures S3 notificati
 node client register warehouse1
 ```
 
-### 5) Start the print client
+### 6) Start the print client
 
 ```bash
 # from repo root
@@ -82,7 +89,7 @@ node client
 TEST_MODE=true node client
 ```
 
-### 6) Quick print from the CLI (optional)
+### 7) Quick print from the CLI (optional)
 
 Uploads a file to S3 with the right metadata; the running client then prints it.
 
