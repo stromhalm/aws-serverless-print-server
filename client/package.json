@@ -6,6 +6,9 @@
   "bin": {
     "client": "./index.js"
   },
+  "engines": {
+    "node": ">=16.0.0"
+  },
   "scripts": {
     "start": "node index.js",
     "test": "node index.js --test",
