@@ -284,6 +284,25 @@ Required only when running `node client register <clientId>` or `unregister`.
 }
 ```
 
+### Minimal IAM policy for web applications (upload-only)
+
+Web apps that submit print jobs only need permission to upload objects into the client’s prefix in the print bucket.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::printserver-*"
+    }
+  ]
+}
+```
+
 ### CDK Deployment Permissions
 
 For registering clients and deploying infrastructure, you'll need broader permissions:
