@@ -20,89 +20,86 @@ The local client uses CUPS to discover, register and print to printers in the lo
 
 Some printer features such as variable label lengths with automatic cutting on the Brother QL-820NWBc are dependent on the operating systems's printer drivers and only proved to work reliably on macOS.
 
-## Quick Start
+## Getting Started
 
-### 1. Deploy Infrastructure
+### 1) Deploy infrastructure
 
 ```bash
-# Install CDK dependencies and deploy
 cd cdk
 npm install
-cdk deploy
+npm run deploy
 
-# Or deploy with custom file retention in S3 (default: 30 days = 720 hours)
-cdk deploy --context fileRetentionHours=168  # 7 days
+# Optional: set custom S3 file retention (default 720 hours = 30 days)
+cdk deploy --context fileRetentionHours=168
 ```
 
-### 2. Register Your Client
+After deployment, note the CloudFormation output `PrintBucketName` (bucket name is `printserver-<account>-<region>`).
 
-Each local client needs to be registered to create their dedicated queue. One client can serve many printers (the actual printer queue is managed by CUPS):
-
-```bash
-# Register your client (requires AWS credentials with S3/SQS permissions)
-node client register warehouse1
-
-# This creates:
-# - SQS queue: printserver-warehouse1
-# - S3 notifications for: clients/warehouse1/
-```
-
-### 3. Install Client Dependencies
+### 2) Install the client
 
 ```bash
-# Install Node.js dependencies
 cd client
 npm install
 ```
 
-### 4. Configure Client Environment
+### 3) Configure environment
 
-Create a `.env` file in the client directory:
+Create `client/.env` (or a `.env` in the repo root). The client loads either automatically.
 
-**.env file:**
 ```bash
-# AWS credentials (minimal SQS-only permissions recommended)
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
+# Authentication (use either access keys or a named profile)
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+# AWS_PROFILE=default
 AWS_REGION=eu-central-1
 
-# Your client identifier (must match registration)
+# Required: bucket name from the CDK output
+S3_BUCKET_NAME=printserver-123456789012-eu-central-1
+
+# Your client identifier (used for per-client SQS queue and S3 prefix)
 CLIENT_ID=warehouse1
 
-# Optional: Enable test mode (logs what would be printed instead of printing)
+# Optional: test mode logs the print command instead of printing
 # TEST_MODE=true
 ```
 
-### 5. Start the Print Client
+### 4) Register the client (one-time)
+
+This creates the SQS queue `printserver-<clientId>` and configures S3 notifications for `clients/<clientId>/`. Requires AWS permissions to create queues and update bucket notifications.
 
 ```bash
-# From the base directory run
+# from repo root
+node client register warehouse1
+```
+
+### 5) Start the print client
+
+```bash
+# from repo root
 node client
 
-# Or run in test mode (logs what would be printed)
+# Test mode (no actual printing)
 TEST_MODE=true node client
 ```
 
-## Usage
+### 6) Quick print from the CLI (optional)
 
-### Command Line Upload
-
-Print files directly from the command line via the client (for example in a second terminal):
+Uploads a file to S3 with the right metadata; the running client then prints it.
 
 ```bash
-# Basic upload and print
-node client your-file.pdf warehouse1 Brother_MFC_L3770CDW_series
+# Basic
+node client test-files/product-label.pdf warehouse1 Brother_MFC_L3770CDW_series
 
-# With print options
+# With options
 node client invoice.pdf warehouse1 192.168.1.100 "-o media=A4 -o copies=2"
 
-# Examples
+# More examples
 node client product-label.pdf warehouse1 "192.168.7.101/socket" "-o media=Custom.62x50mm"
-node client invoice.pdf store1 192.168.1.100 "-o media=A4"                    # defaults to IPP
-node client label.pdf office Brother_MFC_L3770CDW_series "-o media=Letter"    # direct printer name
+node client invoice.pdf store1 192.168.1.100 "-o media=A4"               # defaults to IPP
+node client label.pdf office Brother_MFC_L3770CDW_series "-o media=Letter" # direct printer name
 ```
 
-### Client Management
+### Client management
 
 ```bash
 # Register a new client
@@ -110,20 +107,6 @@ node client register your-client-name
 
 # Unregister a client (removes queue and S3 notifications)
 node client unregister your-client-name
-```
-
-### Client Operation
-
-```bash
-# Start the print client
-
-node client
-
-# Run in test mode (logs what would be printed without actually printing)
-TEST_MODE=true node client
-
-# Clear all messages in queue (⚠️ WARNING: will lose pending prints!)
-node client --clear-queue
 ```
 
 ### Web Application Integration
@@ -232,9 +215,9 @@ Print options can be specified as S3 object metadata with the key `print-options
 
 ## AWS Setup
 
-### Minimal IAM Policy (Recommended)
+### Minimal IAM policy for running the client
 
-Create an IAM user with only the necessary SQS permissions for client applications:
+Allows the client to receive jobs from its SQS queue and download files from S3. Scope resources to your account/region as needed.
 
 ```json
 {
@@ -246,10 +229,57 @@ Create an IAM user with only the necessary SQS permissions for client applicatio
         "sqs:ReceiveMessage",
         "sqs:DeleteMessage",
         "sqs:GetQueueAttributes",
-        "sqs:GetQueueUrl",
-        "sqs:ListQueues"
+        "sqs:GetQueueUrl"
       ],
       "Resource": "arn:aws:sqs:*:*:printserver-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:HeadObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::printserver-*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::printserver-*"
+      ]
+    }
+  ]
+}
+```
+
+### Additional permissions for registration (one-time setup)
+
+Required only when running `node client register <clientId>` or `unregister`.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:CreateQueue",
+        "sqs:SetQueueAttributes",
+        "sqs:DeleteQueue"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketNotificationConfiguration",
+        "s3:PutBucketNotificationConfiguration"
+      ],
+      "Resource": "arn:aws:s3:::printserver-*"
     }
   ]
 }
