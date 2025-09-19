@@ -58,7 +58,7 @@ Create `client/.env` (or a `.env` in the repo root). The client loads either aut
 # AWS_ACCESS_KEY_ID=...
 # AWS_SECRET_ACCESS_KEY=...
 # AWS_PROFILE=default
-AWS_REGION=eu-central-1
+# AWS_REGION=eu-central-1
 
 # Optional: bucket name (auto-discovered from your AWS account and region)
 # S3_BUCKET_NAME=printserver-123456789012-eu-central-1
