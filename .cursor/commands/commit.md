@@ -1,0 +1,1 @@
+Run git commands to commit all current changes to the repository. As a commit message, use a short and concise message describing the changes. Then push the changes to the remote repository.

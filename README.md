@@ -60,8 +60,8 @@ Create `client/.env` (or a `.env` in the repo root). The client loads either aut
 # AWS_PROFILE=default
 AWS_REGION=eu-central-1
 
-# Required: bucket name from the CDK output
-S3_BUCKET_NAME=printserver-123456789012-eu-central-1
+# Optional: bucket name (auto-discovered from your AWS account and region)
+# S3_BUCKET_NAME=printserver-123456789012-eu-central-1
 
 # Your client identifier (used for per-client SQS queue and S3 prefix)
 CLIENT_ID=warehouse1

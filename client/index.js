@@ -13,6 +13,7 @@ require('dotenv').config({ path: envPath });
 // AWS SDK imports
 const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand, GetQueueUrlCommand, CreateQueueCommand, GetQueueAttributesCommand, SetQueueAttributesCommand, DeleteQueueCommand } = require('@aws-sdk/client-sqs');
 const { S3Client, GetObjectCommand, HeadObjectCommand, PutObjectCommand, PutBucketNotificationConfigurationCommand, GetBucketNotificationConfigurationCommand } = require('@aws-sdk/client-s3');
+const { STSClient, GetCallerIdentityCommand } = require('@aws-sdk/client-sts');
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
@@ -38,8 +39,9 @@ async function uploadPrintJob(filePath, clientId, printerId, printOptions = '') 
     }
 
     // Upload to S3
+    const bucketName = await getResolvedBucketName();
     const command = new PutObjectCommand({
-      Bucket: S3_BUCKET_NAME,
+      Bucket: bucketName,
       Key: key,
       Body: fileContent,
       Metadata: metadata
@@ -47,14 +49,14 @@ async function uploadPrintJob(filePath, clientId, printerId, printOptions = '') 
 
     await s3Client.send(command);
 
-    console.log(`📤 Uploaded: s3://${S3_BUCKET_NAME}/${key}`);
+    console.log(`📤 Uploaded: s3://${bucketName}/${key}`);
     console.log(`🖨️  Printer: ${printerId}`);
     console.log(`⚙️  Options: ${printOptions || 'none'}`);
     console.log(`🔄 S3 notification will route to: printserver-${clientId}`);
 
     return {
       success: true,
-      bucket: S3_BUCKET_NAME,
+      bucket: bucketName,
       key: key
     };
 
@@ -97,12 +99,52 @@ process.on('SIGTERM', () => {
 
 // Configuration
 const CLIENT_ID = process.env.CLIENT_ID || 'default-client';
-const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'printserver-bucket';
+const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || null; // optional; auto-resolved if not set
 const TEST_MODE = argv.test || process.env.TEST_MODE === 'true';
 
 // AWS Clients
 const sqsClient = new SQSClient();
 const s3Client = new S3Client();
+const stsClient = new STSClient();
+
+// --- Auto bucket resolution helpers ---
+let resolvedBucketNameCache = null;
+
+async function resolveRegionFromClient(client) {
+  try {
+    const regionProvider = client.config.region;
+    const region = typeof regionProvider === 'function' ? await regionProvider() : regionProvider;
+    return region || process.env.AWS_REGION || 'us-east-1';
+  } catch {
+    return process.env.AWS_REGION || 'us-east-1';
+  }
+}
+
+async function getAccountId() {
+  const res = await stsClient.send(new GetCallerIdentityCommand({}));
+  return res.Account;
+}
+
+async function getResolvedBucketName() {
+  if (S3_BUCKET_NAME) return S3_BUCKET_NAME;
+  if (resolvedBucketNameCache) return resolvedBucketNameCache;
+  const [accountId, region] = await Promise.all([
+    getAccountId(),
+    resolveRegionFromClient(s3Client)
+  ]);
+  const name = `printserver-${accountId}-${region}`;
+  resolvedBucketNameCache = name;
+  return name;
+}
+
+function getRegionFromQueueUrl(queueUrl) {
+  try {
+    const match = queueUrl.match(/^https:\/\/sqs\.([a-z0-9-]+)\.amazonaws\.com\//);
+    return match ? match[1] : (process.env.AWS_REGION || null);
+  } catch {
+    return process.env.AWS_REGION || null;
+  }
+}
 
 // Client registration function
 async function registerClient(clientId) {
@@ -136,7 +178,8 @@ async function registerClient(clientId) {
     // Get the queue ARN for S3 notifications
     const urlParts = queueUrl.split('/');
     const accountId = urlParts[urlParts.length - 2];
-    const queueArn = `arn:aws:sqs:${process.env.AWS_REGION}:${accountId}:${queueName}`;
+    const queueRegion = getRegionFromQueueUrl(queueUrl) || await resolveRegionFromClient(sqsClient);
+    const queueArn = `arn:aws:sqs:${queueRegion}:${accountId}:${queueName}`;
     console.log(`🔗 Queue ARN: ${queueArn}`);
 
     // Set queue policy to allow S3 to send messages
@@ -153,7 +196,7 @@ async function registerClient(clientId) {
               Action: 'sqs:SendMessage',
               Resource: queueArn,
               Condition: {
-                ArnEquals: { 'aws:SourceArn': `arn:aws:s3:::${S3_BUCKET_NAME}` }
+                ArnEquals: { 'aws:SourceArn': `arn:aws:s3:::${await getResolvedBucketName()}` }
               }
             }
           ]
@@ -167,7 +210,7 @@ async function registerClient(clientId) {
     // Configure S3 bucket notifications
     console.log(`📡 Configuring S3 bucket notifications...`);
     const currentNotifications = await s3Client.send(new GetBucketNotificationConfigurationCommand({
-      Bucket: S3_BUCKET_NAME
+      Bucket: await getResolvedBucketName()
     }));
 
     // Check if notification already exists
@@ -201,7 +244,7 @@ async function registerClient(clientId) {
       };
 
       await s3Client.send(new PutBucketNotificationConfigurationCommand({
-        Bucket: S3_BUCKET_NAME,
+        Bucket: await getResolvedBucketName(),
         NotificationConfiguration: updatedNotifications
       }));
 
@@ -230,7 +273,7 @@ async function unregisterClient(clientId) {
 
     // Get current bucket notifications
     const currentNotifications = await s3Client.send(new GetBucketNotificationConfigurationCommand({
-      Bucket: S3_BUCKET_NAME
+      Bucket: await getResolvedBucketName()
     }));
 
     // Remove the notification for this client
@@ -246,7 +289,7 @@ async function unregisterClient(clientId) {
     if (removedCount > 0) {
       console.log(`📡 Removing S3 notification for ${clientId}...`);
       await s3Client.send(new PutBucketNotificationConfigurationCommand({
-        Bucket: S3_BUCKET_NAME,
+        Bucket: await getResolvedBucketName(),
         NotificationConfiguration: updatedNotifications
       }));
       console.log(`✅ Removed ${removedCount} S3 notification(s)`);
