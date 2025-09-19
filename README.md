@@ -10,7 +10,7 @@ The serverless architecture makes it scalable and hosting costs (your AWS bill) 
 
 After a file is uploaded to the S3 bucket, an instant notification is sent to the client's SQS queue. The client then downloads the file and prints it to the printer. The client can forward prints to multiple printers that are connected via USB or just visible in the local network with a static IP address.
 
-The local client uses CUPS to discover, register and print to printers in the local network.
+The client uses [CUPS](https://www.cups.org/) to discover, register and print to local printers. The queues for individual printers are also managed by CUPS.
 
 ## Prerequisites
 
