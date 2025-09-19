@@ -236,8 +236,7 @@ Allows the client to receive jobs from its SQS queue and download files from S3.
     {
       "Effect": "Allow",
       "Action": [
-        "s3:GetObject",
-        "s3:HeadObject"
+        "s3:GetObject"
       ],
       "Resource": [
         "arn:aws:s3:::printserver-*/*"
