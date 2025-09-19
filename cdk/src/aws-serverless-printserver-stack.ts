@@ -16,13 +16,10 @@ export class AwsServerlessPrintserverStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY, // Delete bucket on stack deletion
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      lifecycleRules: [
-        {
-          // Delete files after configured hours (default: 24 hours)
-          enabled: true,
-          expiration: cdk.Duration.hours(fileRetentionHours),
-        },
-      ],
+      lifecycleRules: [{
+        enabled: true,
+        expiration: cdk.Duration.hours(fileRetentionHours),
+      }],
     });
 
     // Template SQS queue for client-specific queues (printserver-{clientId})
@@ -53,7 +50,6 @@ export class AwsServerlessPrintserverStack extends cdk.Stack {
           effect: iam.Effect.ALLOW,
           actions: [
             's3:GetObject',
-            's3:HeadObject',
             's3:ListBucket',
           ],
           resources: [
