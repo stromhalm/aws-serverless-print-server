@@ -8,7 +8,7 @@ The serverless architecture makes it scalable and hosting costs (your AWS bill) 
 
 ## How It Works
 
-After a files is uploaded to the S3 bucket, an instant notification is sent to the client's SQS queue. The client then downloads the file and prints it to the printer.
+After files is uploaded to the S3 bucket, an instant notification is sent to the client's SQS queue. The client then downloads the file and prints it to the printer.
 
 The local client uses CUPS to discover, register and print to printers in the local network.
 
@@ -30,7 +30,7 @@ cd cdk
 npm install
 cdk deploy
 
-# Or deploy with custom file retention (default: 30 days = 720 hours)
+# Or deploy with custom file retention in S3 (default: 30 days = 720 hours)
 cdk deploy --context fileRetentionHours=168  # 7 days
 ```
 
@@ -40,11 +40,11 @@ Each local client needs to be registered to create their dedicated queue. One cl
 
 ```bash
 # Register your client (requires AWS credentials with S3/SQS permissions)
-node client register your-store-name
+node client register warehouse1
 
 # This creates:
-# - SQS queue: printserver-your-store-name
-# - S3 notifications for: clients/your-store-name/
+# - SQS queue: printserver-warehouse1
+# - S3 notifications for: clients/warehouse1/
 ```
 
 ### 3. Install Client Dependencies
@@ -67,7 +67,7 @@ AWS_SECRET_ACCESS_KEY=your-secret-key
 AWS_REGION=eu-central-1
 
 # Your client identifier (must match registration)
-CLIENT_ID=your-store-name
+CLIENT_ID=warehouse1
 
 # Optional: Enable test mode (logs what would be printed instead of printing)
 # TEST_MODE=true
@@ -76,29 +76,28 @@ CLIENT_ID=your-store-name
 ### 5. Start the Print Client
 
 ```bash
-# Start processing print jobs (from client directory)
-cd client
-node index.js
+# From the base directory run
+node client
 
 # Or run in test mode (logs what would be printed)
-TEST_MODE=true node index.js
+TEST_MODE=true node client
 ```
 
 ## Usage
 
 ### Command Line Upload
 
-Upload files directly from your application or command line:
+Print files directly from the command line via the client (for example in a second terminal):
 
 ```bash
-# Basic upload and print (from root directory)
-node client your-file.pdf your-client printer-name
+# Basic upload and print
+node client your-file.pdf warehouse1 Brother_MFC_L3770CDW_series
 
 # With print options
-node client invoice.pdf store1 192.168.1.100 "-o media=A4 -o copies=2"
+node client invoice.pdf warehouse1 192.168.1.100 "-o media=A4 -o copies=2"
 
 # Examples
-node client product-label.pdf warehouse "192.168.7.101/socket" "-o media=Custom.62x50mm"
+node client product-label.pdf warehouse1 "192.168.7.101/socket" "-o media=Custom.62x50mm"
 node client invoice.pdf store1 192.168.1.100 "-o media=A4"                    # defaults to IPP
 node client label.pdf office Brother_MFC_L3770CDW_series "-o media=Letter"    # direct printer name
 ```
@@ -116,22 +115,15 @@ node client unregister your-client-name
 ### Client Operation
 
 ```bash
-# Start the print client (from client directory or use full path)
-cd client && node index.js
-# or from root:
-node client/index.js
+# Start the print client
+
+node client
 
 # Run in test mode (logs what would be printed without actually printing)
-TEST_MODE=true node client/index.js
+TEST_MODE=true node client
 
 # Clear all messages in queue (⚠️ WARNING: will lose pending prints!)
-node client/index.js --clear-queue
-
-# Monitor queue status in real-time
-node client/index.js --monitor
-
-# Wait for in-flight messages to become visible
-node client/index.js --wait
+node client --clear-queue
 ```
 
 ### Web Application Integration
@@ -237,54 +229,6 @@ Print options can be specified as S3 object metadata with the key `print-options
 - **Socket**: Raw socket connection, reliable for label printers
 - **LPD (Line Printer Daemon)**: Traditional protocol, works with shipping label printers
 - **Direct printer names**: Use any printer configured in CUPS
-
-### Error Handling
-
-- **Failed print jobs** are logged locally but not retried automatically
-- **Printer registration failures** are handled gracefully
-- **Network printer issues** are managed by the operating system's print queue
-- **S3 upload failures** return error status to the application
-- **Queue processing errors** are logged but don't stop the client
-
-## Troubleshooting
-
-### Common Issues
-
-**No messages received:**
-- Verify `CLIENT_ID` in `.env` matches the registered client name
-- Check AWS credentials have SQS permissions
-- Ensure client is registered: `node client register your-client-id`
-
-**Messages stuck as "in-flight":**
-- These are from previous interrupted sessions
-- Wait 5 minutes for visibility timeout to expire
-- Or use `node client/index.js --clear-queue` (⚠️ loses pending prints)
-
-**Client not starting:**
-- Check `.env` file exists in client directory
-- Verify AWS credentials are correct
-- Ensure Node.js dependencies are installed: `cd client && npm install`
-
-**Printer connection issues:**
-- Test printer connectivity: `lpstat -p`
-- Check printer IP and protocol
-- Verify printer is online and accepting connections
-
-### Useful Commands
-
-```bash
-# Check queue status
-aws sqs get-queue-attributes --queue-url $(aws sqs get-queue-url --queue-name printserver-your-client --query QueueUrl --output text) --attribute-names ApproximateNumberOfMessages
-
-# Monitor client logs
-node client/index.js 2>&1 | tee print-client.log
-
-# Test printer connectivity
-lpstat -p your-printer-name
-
-# List all printserver queues
-aws sqs list-queues --queue-name-prefix printserver-
-```
 
 ## AWS Setup
 
