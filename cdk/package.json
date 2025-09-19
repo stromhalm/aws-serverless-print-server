@@ -1,0 +1,33 @@
+{
+  "name": "aws-serverless-printserver",
+  "version": "1.0.0",
+  "description": "AWS Serverless Print Server using CDK",
+  "main": "lib/aws-serverless-printserver-stack.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage",
+    "cdk": "cdk",
+    "deploy": "cdk deploy",
+    "synth": "cdk synth"
+  },
+  "devDependencies": {
+    "@types/node": "^20.7.1",
+    "@vitest/ui": "^3.2.4",
+    "aws-cdk": "2.100.0",
+    "jsdom": "^27.0.0",
+    "ts-node": "^10.9.1",
+    "typescript": "~5.2.0",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.427.0",
+    "@aws-sdk/client-sqs": "^3.427.0",
+    "aws-cdk-lib": "2.100.0",
+    "constructs": "^10.0.0",
+    "source-map-support": "^0.5.21"
+  }
+}

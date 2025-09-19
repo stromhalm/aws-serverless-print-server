@@ -1,0 +1,16 @@
+{
+  "name": "aws-serverless-printserver",
+  "version": "1.0.0",
+  "description": "AWS Serverless Print Server - Fast, reliable printing from web applications",
+  "main": "index.js",
+  "scripts": {
+    "demo": "node demo.js",
+    "cdk:deploy": "cd cdk && cdk deploy",
+    "client:check": "cd client && npm run check-setup",
+    "client:start": "cd client && npm start",
+    "client:test": "cd client && npm run test"
+  },
+  "keywords": ["aws", "serverless", "printing", "cdk", "s3", "sqs"],
+  "author": "",
+  "license": "ISC"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "aws-print-client",
+  "version": "1.0.0",
+  "description": "AWS Serverless Print Client",
+  "main": "index.js",
+  "bin": {
+    "client": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node index.js --test",
+    "check-setup": "node check-setup.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.427.0",
+    "@aws-sdk/client-sqs": "^3.427.0",
+    "minimist": "^1.2.8",
+    "dotenv": "^16.3.1"
+  }
+}
