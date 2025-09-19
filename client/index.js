@@ -890,5 +890,13 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
+// Export functions for testing
+module.exports = {
+  uploadPrintJob,
+  getResolvedBucketName,
+  registerClient,
+  unregisterClient
+};
+
 // Start the client
 main().catch(console.error);
