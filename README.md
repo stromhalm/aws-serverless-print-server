@@ -40,7 +40,7 @@ npm run deploy
 cdk deploy --context fileRetentionHours=168
 ```
 
-After deployment, note the CloudFormation output `PrintBucketName` (bucket name is `printserver-<account>-<region>`).
+After deployment, note the CloudFormation output `PrintBucketName`. The default bucket name is `printserver-<AWS_ACCOUNT_ID>-<AWS_REGION>`, e.g., `printserver-123456789012-eu-central-1`.
 
 ### 3) Install the client
 
@@ -51,7 +51,7 @@ npm install
 
 ### 4) Configure environment
 
-Create `client/.env` (or a `.env` in the repo root). The client loads either automatically.
+Create `client/.env` or a `.env` in the repo root. The client loads `client/.env` first, then root `.env`. Shell environment variables override both.
 
 ```bash
 # Authentication (use either access keys or a named profile)
@@ -183,6 +183,8 @@ clients/{clientId}/{filename}
 - `clients/store1/invoice.pdf`
 - `clients/warehouse/label.pdf`
 
+> Note: Only objects under `clients/<CLIENT_ID>/...` trigger notifications to that client’s SQS queue.
+
 ### Print Options
 
 Print options can be specified as S3 object metadata with the key `print-options`. The value should contain valid CUPS print options:
@@ -202,6 +204,8 @@ Print options can be specified as S3 object metadata with the key `print-options
 ### Printer Configuration
 
 #### Printer IDs
+
+> Note: IP addresses below are examples. Replace with your printer’s local static IP. If you specify only an IP (e.g., `192.168.1.100`) the client assumes IPP (`/ipp`). You can use `lpstat -v` to list all printers and their identifiers known to CUPS on your system.
 
 **Network Printers:**
 - `192.168.1.100/ipp` - Internet Printing Protocol (recommended for most office printers)
