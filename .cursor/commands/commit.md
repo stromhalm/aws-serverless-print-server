@@ -1,2 +1,0 @@
-Look at the uncommitted changes in the repository. From the git diff and your recent context, summarize the current changes.
-Run git commands to commit all current changes to the repository with a one line message describing the changes. Then push the changes to the remote repository.
