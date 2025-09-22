@@ -12,7 +12,7 @@ require('dotenv').config({ path: envPath });
 
 // AWS SDK imports
 const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand, GetQueueUrlCommand, CreateQueueCommand, GetQueueAttributesCommand, SetQueueAttributesCommand, DeleteQueueCommand } = require('@aws-sdk/client-sqs');
-const { S3Client, GetObjectCommand, HeadObjectCommand, PutObjectCommand, PutBucketNotificationConfigurationCommand, GetBucketNotificationConfigurationCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, PutObjectCommand, PutBucketNotificationConfigurationCommand, GetBucketNotificationConfigurationCommand } = require('@aws-sdk/client-s3');
 const { STSClient, GetCallerIdentityCommand } = require('@aws-sdk/client-sts');
 const { exec } = require('child_process');
 const util = require('util');
@@ -569,20 +569,15 @@ function parseSqsMessage(message) {
   return { isValid: false };
 }
 
-// Fetch S3 metadata and download file in parallel
+// Fetch S3 metadata and download file (single GetObject)
 async function fetchS3DataAndDownload(bucket, key) {
   const filename = path.basename(key);
   const localFilePath = path.join(TMP_DIR, filename);
-
-  // Execute both requests in parallel
-  const [headResponse, getResponse] = await Promise.all([
-    s3Client.send(new HeadObjectCommand({ Bucket: bucket, Key: key })),
-    s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
-  ]);
+  const getResponse = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
 
   // Extract metadata
-  const printerId = headResponse.Metadata?.['printer'] || 'unknown';
-  const printOptions = headResponse.Metadata?.['print-options'] || '';
+  const printerId = getResponse.Metadata?.['printer'] || 'unknown';
+  const printOptions = getResponse.Metadata?.['print-options'] || '';
 
   // Download file to disk
   const stream = getResponse.Body;
@@ -773,7 +768,7 @@ async function registerNewPrinter(ip, protocol) {
     const ppdPath = getPPDPathForPrinter(ip, protocol);
 
     if (protocol === "socket") {
-      // Use PPD file if available (matching the old tool's behavior)
+      // Use PPD file if available
       if (ppdPath) {
         command = `lpadmin -p ${localPrinterName} -E -v "socket://${ip}/" -P "${ppdPath}"`;
       } else {
@@ -782,7 +777,7 @@ async function registerNewPrinter(ip, protocol) {
         command = `lpadmin -p ${localPrinterName} -E -v "socket://${ip}/" -m everywhere`;
       }
     } else if (protocol === "lpd") {
-      // Use PPD file if available (matching the old tool's behavior)
+      // Use PPD file if available
       if (ppdPath) {
         command = `lpadmin -p ${localPrinterName} -E -v "lpd://${ip}" -P "${ppdPath}"`;
       } else {
@@ -835,7 +830,7 @@ function getPPDPathForPrinter(ip, protocol) {
     }
   }
 
-  // Check for compressed PPD files (what the old tool used) - for socket protocol
+  // Check for compressed PPD files - for socket protocol
   const compressedPPDPath = path.join(__dirname, 'BrotherQL820NwbCupsPpd.gz');
   if (fs.existsSync(compressedPPDPath)) {
     console.log(`Using compressed Brother PPD file: ${compressedPPDPath}`);
