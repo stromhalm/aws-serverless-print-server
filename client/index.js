@@ -71,14 +71,14 @@ async function uploadPrintJob(filePath, clientId, printerId, printOptions = '') 
 
 // Handle graceful shutdown
 let isShuttingDown = false;
-let isProcessingMessage = false;
+let activeProcessingCount = 0;
 
 process.on('SIGINT', () => {
   console.log('\n^CReceived SIGINT, shutting down gracefully...');
   isShuttingDown = true;
 
-  if (isProcessingMessage) {
-    console.log('Currently processing a message, will exit after completion...');
+  if (activeProcessingCount > 0) {
+    console.log(`Currently processing ${activeProcessingCount} message(s), will exit after completion...`);
     // Don't exit immediately, let the finally block in processMessage handle it
   } else {
     process.exit(0);
@@ -89,8 +89,8 @@ process.on('SIGTERM', () => {
   console.log('\nReceived SIGTERM, shutting down gracefully...');
   isShuttingDown = true;
 
-  if (isProcessingMessage) {
-    console.log('Currently processing a message, will exit after completion...');
+  if (activeProcessingCount > 0) {
+    console.log(`Currently processing ${activeProcessingCount} message(s), will exit after completion...`);
     // Don't exit immediately, let the finally block in processMessage handle it
   } else {
     process.exit(0);
@@ -431,9 +431,17 @@ async function main() {
 
         if (isShuttingDown) break;
 
-        for (const message of messages) {
-          await processMessage(message, queueUrl);
-        }
+        // Process all messages in parallel for better throughput
+        const results = await Promise.allSettled(
+          messages.map(message => processMessage(message, queueUrl))
+        );
+        
+        // Log any failures for debugging
+        results.forEach((result, idx) => {
+          if (result.status === 'rejected') {
+            console.error(`❌ Message ${idx + 1} processing failed:`, result.reason);
+          }
+        });
 
       } catch (error) {
         if (isShuttingDown) break;
@@ -593,64 +601,71 @@ async function fetchS3DataAndDownload(bucket, key) {
 
 async function processMessage(message, queueUrl) {
   let localFilePath = null;
+  const messageId = message.MessageId?.substring(0, 8) || 'unknown';
 
   try {
-    isProcessingMessage = true;
+    activeProcessingCount++;
+    console.log(`[${messageId}] 📥 Processing message (${activeProcessingCount} active)`);
 
     if (isShuttingDown) {
-      console.log('⏹️  Shutdown requested, skipping message');
+      console.log(`[${messageId}] ⏹️  Shutdown requested, skipping message`);
       return;
     }
 
     // Parse SQS message
     const s3Data = parseSqsMessage(message);
     if (!s3Data.isValid) {
-      console.warn('⚠️  Skipping message with unknown format');
+      console.warn(`[${messageId}] ⚠️  Skipping message with unknown format`);
       // Delete invalid messages to prevent infinite retries
       await deleteMessage(queueUrl, message.ReceiptHandle);
       return;
     }
 
+    console.log(`[${messageId}] 📄 File: ${s3Data.key.split('/').pop()}`);
+
     // Filter messages for this CLIENT_ID
     if (!s3Data.key.startsWith(`clients/${CLIENT_ID}/`)) {
-      console.log(`⏭️  Skipping message for different client: ${s3Data.key}`);
+      console.log(`[${messageId}] ⏭️  Skipping message for different client: ${s3Data.key}`);
       // Delete messages for other clients to prevent accumulation
       await deleteMessage(queueUrl, message.ReceiptHandle);
       return;
     }
 
     // Fetch metadata and download file in parallel
+    console.log(`[${messageId}] ⬇️  Downloading...`);
     const { localFilePath: filePath, printerId, printOptions } = await fetchS3DataAndDownload(s3Data.bucket, s3Data.key);
     localFilePath = filePath;
 
     if (isShuttingDown) return;
 
     // Print the file
+    console.log(`[${messageId}] 🖨️  Printing to ${printerId}...`);
     await printFile(printerId, localFilePath, printOptions);
 
     // Success - delete message from queue
     await deleteMessage(queueUrl, message.ReceiptHandle);
 
-    console.log(`✅ Printed: ${printerId}`);
+    console.log(`[${messageId}] ✅ Printed: ${printerId}`);
 
   } catch (error) {
-    console.error('❌ Error processing message:', error.message);
-    console.log('🔄 Message will be retried after visibility timeout');
+    console.error(`[${messageId}] ❌ Error processing message:`, error.message);
+    console.log(`[${messageId}] 🔄 Message will be retried after visibility timeout`);
   } finally {
     // Clean up temp file
     if (localFilePath && fs.existsSync(localFilePath)) {
       try {
         fs.unlinkSync(localFilePath);
-        console.log('🧹 Cleaned up temporary file');
+        console.log(`[${messageId}] 🧹 Cleaned up temporary file`);
       } catch (cleanupError) {
-        console.warn('⚠️  Failed to clean up temp file:', cleanupError.message);
+        console.warn(`[${messageId}] ⚠️  Failed to clean up temp file:`, cleanupError.message);
       }
     }
 
-    isProcessingMessage = false;
+    activeProcessingCount--;
+    console.log(`[${messageId}] 🏁 Done (${activeProcessingCount} active)`);
 
-    if (isShuttingDown) {
-      console.log('🏁 Message processing complete, shutting down...');
+    if (isShuttingDown && activeProcessingCount === 0) {
+      console.log('🏁 All messages processed, shutting down...');
       process.exit(0);
     }
   }
