@@ -107,6 +107,26 @@ const sqsClient = new SQSClient();
 const s3Client = new S3Client();
 const stsClient = new STSClient();
 
+// Idempotency cache: track processed S3 keys to prevent duplicate printing
+// Key: S3 object key, Value: timestamp when processed
+const processedKeys = new Map();
+const IDEMPOTENCY_CACHE_DURATION = 3600000; // 1 hour in milliseconds
+
+// Clean up old entries from idempotency cache periodically
+setInterval(() => {
+  const now = Date.now();
+  const expiredKeys = [];
+  for (const [key, timestamp] of processedKeys.entries()) {
+    if (now - timestamp > IDEMPOTENCY_CACHE_DURATION) {
+      expiredKeys.push(key);
+    }
+  }
+  expiredKeys.forEach(key => processedKeys.delete(key));
+  if (expiredKeys.length > 0) {
+    console.log(`🧹 Cleaned ${expiredKeys.length} expired idempotency entries`);
+  }
+}, 300000); // Clean every 5 minutes
+
 // --- Auto bucket resolution helpers ---
 let resolvedBucketNameCache = null;
 
@@ -526,6 +546,7 @@ async function receiveMessages(queueUrl) {
     MaxNumberOfMessages: 10,
     WaitTimeSeconds: 20,
     VisibilityTimeout: 300,
+    AttributeNames: ['ApproximateReceiveCount', 'SentTimestamp']
   });
 
   const response = await sqsClient.send(command);
@@ -544,15 +565,17 @@ async function drainVisibleMessages(queueUrl) {
       MaxNumberOfMessages: 10,
       WaitTimeSeconds: 0,
       VisibilityTimeout: 300,
+      AttributeNames: ['ApproximateReceiveCount', 'SentTimestamp']
     }));
 
     const messages = response.Messages || [];
     if (messages.length === 0) break;
 
-    for (const message of messages) {
-      await processMessage(message, queueUrl);
-      totalProcessed++;
-    }
+    // Process startup messages in parallel too
+    await Promise.allSettled(
+      messages.map(message => processMessage(message, queueUrl))
+    );
+    totalProcessed += messages.length;
   }
 
   if (totalProcessed > 0) {
@@ -602,10 +625,17 @@ async function fetchS3DataAndDownload(bucket, key) {
 async function processMessage(message, queueUrl) {
   let localFilePath = null;
   const messageId = message.MessageId?.substring(0, 8) || 'unknown';
+  const receiveCount = parseInt(message.Attributes?.ApproximateReceiveCount || '1');
 
   try {
     activeProcessingCount++;
-    console.log(`[${messageId}] 📥 Processing message (${activeProcessingCount} active)`);
+    
+    // Log receive count to detect reprocessing
+    if (receiveCount > 1) {
+      console.log(`[${messageId}] 📥 Processing message (${activeProcessingCount} active) ⚠️  RECEIVE COUNT: ${receiveCount}`);
+    } else {
+      console.log(`[${messageId}] 📥 Processing message (${activeProcessingCount} active)`);
+    }
 
     if (isShuttingDown) {
       console.log(`[${messageId}] ⏹️  Shutdown requested, skipping message`);
@@ -631,6 +661,16 @@ async function processMessage(message, queueUrl) {
       return;
     }
 
+    // IDEMPOTENCY CHECK: Skip if already processed recently
+    if (processedKeys.has(s3Data.key)) {
+      const processedTime = processedKeys.get(s3Data.key);
+      const ageMinutes = Math.floor((Date.now() - processedTime) / 60000);
+      console.log(`[${messageId}] 🔄 DUPLICATE DETECTED - Already processed ${ageMinutes} min ago`);
+      console.log(`[${messageId}] ⏭️  Skipping duplicate, deleting message`);
+      await deleteMessage(queueUrl, message.ReceiptHandle);
+      return;
+    }
+
     // Fetch metadata and download file in parallel
     console.log(`[${messageId}] ⬇️  Downloading...`);
     const { localFilePath: filePath, printerId, printOptions } = await fetchS3DataAndDownload(s3Data.bucket, s3Data.key);
@@ -642,6 +682,10 @@ async function processMessage(message, queueUrl) {
     console.log(`[${messageId}] 🖨️  Printing to ${printerId}...`);
     await printFile(printerId, localFilePath, printOptions);
 
+    // Mark as processed BEFORE deleting message (idempotency)
+    processedKeys.set(s3Data.key, Date.now());
+    console.log(`[${messageId}] 💾 Marked as processed (cache size: ${processedKeys.size})`);
+
     // Success - delete message from queue
     await deleteMessage(queueUrl, message.ReceiptHandle);
 
@@ -649,6 +693,7 @@ async function processMessage(message, queueUrl) {
 
   } catch (error) {
     console.error(`[${messageId}] ❌ Error processing message:`, error.message);
+    console.error(`[${messageId}] Stack:`, error.stack);
     console.log(`[${messageId}] 🔄 Message will be retried after visibility timeout`);
   } finally {
     // Clean up temp file
