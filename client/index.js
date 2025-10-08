@@ -166,23 +166,12 @@ function getRegionFromQueueUrl(queueUrl) {
   }
 }
 
-function parseClientIdentifiers(inputClientId) {
-  // Accept either raw client id (e.g., "store1") or full queue name (e.g., "printserver-store1" or FIFO "printserver-store1.fifo")
-  let clientIdRaw = inputClientId.trim();
-  // Strip suffix
-  if (clientIdRaw.endsWith('.fifo')) clientIdRaw = clientIdRaw.slice(0, -5);
-  // Strip prefix
-  if (clientIdRaw.startsWith('printserver-')) clientIdRaw = clientIdRaw.replace(/^printserver-/, '');
-  const queueNameFifo = `printserver-${clientIdRaw}.fifo`;
-  return { clientIdRaw, queueNameFifo };
-}
-
 // Client registration function (creates FIFO queue)
-async function registerClient(inputClientId) {
+async function registerClient(clientId) {
   try {
-    const { clientIdRaw, queueNameFifo } = parseClientIdentifiers(inputClientId);
-    const queueName = queueNameFifo; // Use FIFO queue for exactly-once + ordering
-    console.log(`🔧 Registering client: ${clientIdRaw}`);
+    // Use FIFO queue for exactly-once + ordering
+    const queueName = `printserver-${clientId}.fifo`;
+    console.log(`🔧 Registering client: ${clientId}`);
 
     // Check if queue already exists
     let queueUrl;
@@ -192,21 +181,17 @@ async function registerClient(inputClientId) {
     } catch (error) {
       // Queue doesn't exist, create it
       console.log(`📋 Creating queue: ${queueName}`);
-      const queueAttributes = {
-        // Increase if prints can take long
-        VisibilityTimeout: '300',
-        MessageRetentionPeriod: '604800',
-        ReceiveMessageWaitTimeSeconds: '20',
-      };
-
-      if (queueName.endsWith('.fifo')) {
-        queueAttributes.FifoQueue = 'true';
-        queueAttributes.ContentBasedDeduplication = 'true';
-      }
-
       await sqsClient.send(new CreateQueueCommand({
         QueueName: queueName,
-        Attributes: queueAttributes,
+        Attributes: {
+          // FIFO attributes
+          FifoQueue: 'true',
+          ContentBasedDeduplication: 'true',
+          // Increase if prints can take long
+          VisibilityTimeout: '300',
+          MessageRetentionPeriod: '604800',
+          ReceiveMessageWaitTimeSeconds: '20',
+        }
       }));
 
       // Wait a moment for the queue to be fully created
@@ -255,21 +240,21 @@ async function registerClient(inputClientId) {
 
     // Check if notification already exists
     const existingNotification = (currentNotifications.QueueConfigurations || []).find(
-      config => config.Id === `PrintServer-${clientIdRaw}`
+      config => config.Id === `PrintServer-${clientId}`
     );
 
     if (existingNotification) {
       console.log(`⚠️  S3 notification already exists for ${clientId}, skipping...`);
     } else {
       const newNotification = {
-        Id: `PrintServer-${clientIdRaw}`,
+        Id: `PrintServer-${clientId}`,
         QueueArn: queueArn,
         Events: ['s3:ObjectCreated:*'],
         Filter: {
           Key: {
             FilterRules: [{
               Name: 'prefix',
-              Value: `clients/${clientIdRaw}/`
+              Value: `clients/${clientId}/`
             }]
           }
         }
@@ -288,13 +273,12 @@ async function registerClient(inputClientId) {
         NotificationConfiguration: updatedNotifications
       }));
 
-      console.log(`✅ S3 notification configured for ${clientIdRaw}`);
+      console.log(`✅ S3 notification configured for ${clientId}`);
     }
 
-    console.log(`✅ Client registered successfully: ${clientIdRaw}`);
+    console.log(`✅ Client registered successfully: ${clientId}`);
     console.log(`🎯 Queue: ${queueName}`);
-    console.log(`📁 S3 prefix: clients/${clientIdRaw}/`);
-    process.exit(0);
+    console.log(`📁 S3 prefix: clients/${clientId}/`);
 
   } catch (error) {
     console.error('❌ Registration failed:', error.message);
@@ -308,10 +292,9 @@ async function registerClient(inputClientId) {
 }
 
 // Unregister client function
-async function unregisterClient(inputClientId) {
+async function unregisterClient(clientId) {
   try {
-    const { clientIdRaw, queueNameFifo } = parseClientIdentifiers(inputClientId);
-    console.log(`🔧 Unregistering client: ${clientIdRaw}`);
+    console.log(`🔧 Unregistering client: ${clientId}`);
 
     // Get current bucket notifications
     const currentNotifications = await s3Client.send(new GetBucketNotificationConfigurationCommand({
@@ -322,40 +305,39 @@ async function unregisterClient(inputClientId) {
     const updatedNotifications = {
       ...currentNotifications,
       QueueConfigurations: (currentNotifications.QueueConfigurations || []).filter(config =>
-        config.Id !== `PrintServer-${clientIdRaw}`
+        config.Id !== `PrintServer-${clientId}`
       )
     };
 
     const removedCount = (currentNotifications.QueueConfigurations || []).length - (updatedNotifications.QueueConfigurations || []).length;
 
     if (removedCount > 0) {
-      console.log(`📡 Removing S3 notification for ${clientIdRaw}...`);
+      console.log(`📡 Removing S3 notification for ${clientId}...`);
       await s3Client.send(new PutBucketNotificationConfigurationCommand({
         Bucket: await getResolvedBucketName(),
         NotificationConfiguration: updatedNotifications
       }));
       console.log(`✅ Removed ${removedCount} S3 notification(s)`);
     } else {
-      console.log(`⚠️  No S3 notification found for ${clientIdRaw}`);
+      console.log(`⚠️  No S3 notification found for ${clientId}`);
     }
 
     // Delete the queue
     try {
-      const queueName = queueNameFifo;
+      const queueName = `printserver-${clientId}.fifo`;
       console.log(`🗑️  Deleting queue: ${queueName}`);
-      const queueUrl = await getQueueUrl(queueName, { createIfMissing: false });
+      const queueUrl = await getQueueUrl(queueName);
       await sqsClient.send(new DeleteQueueCommand({ QueueUrl: queueUrl }));
       console.log(`✅ Queue deleted: ${queueName}`);
     } catch (queueError) {
       if (queueError.name === 'QueueDoesNotExist') {
-        console.log(`⚠️  Queue ${queueNameFifo} does not exist (already deleted)`);
+        console.log(`⚠️  Queue ${queueName} does not exist (already deleted)`);
       } else {
         console.log(`⚠️  Could not delete queue: ${queueError.message}`);
       }
     }
 
-    console.log(`✅ Client unregistered successfully: ${clientIdRaw}`);
-    process.exit(0);
+    console.log(`✅ Client unregistered successfully: ${clientId}`);
 
   } catch (error) {
     console.error('❌ Unregistration failed:', error.message);
@@ -514,7 +496,7 @@ async function main() {
   }
 }
 
-async function getQueueUrl(queueName, options = { createIfMissing: true }) {
+async function getQueueUrl(queueName) {
   try {
     const command = new GetQueueUrlCommand({
       QueueName: queueName
@@ -523,23 +505,16 @@ async function getQueueUrl(queueName, options = { createIfMissing: true }) {
     const response = await sqsClient.send(command);
     return response.QueueUrl;
   } catch (error) {
-    if (error.name === 'QueueDoesNotExist' && options.createIfMissing) {
+    if (error.name === 'QueueDoesNotExist') {
       console.log(`Queue '${queueName}' does not exist. Creating it now...`);
       try {
-        const attributes = {
-          VisibilityTimeout: '300', // 5 minutes
-          MessageRetentionPeriod: '604800', // 7 days
-          ReceiveMessageWaitTimeSeconds: '20', // Long polling
-        };
-
-        if (queueName.endsWith('.fifo')) {
-          attributes.FifoQueue = 'true';
-          attributes.ContentBasedDeduplication = 'true';
-        }
-
         const createQueueCommand = new CreateQueueCommand({
           QueueName: queueName,
-          Attributes: attributes,
+          Attributes: {
+            VisibilityTimeout: '300', // 5 minutes
+            MessageRetentionPeriod: '604800', // 7 days
+            ReceiveMessageWaitTimeSeconds: '20', // Long polling
+          }
         });
 
         const response = await sqsClient.send(createQueueCommand);
