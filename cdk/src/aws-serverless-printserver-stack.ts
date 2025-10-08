@@ -22,10 +22,12 @@ export class AwsServerlessPrintserverStack extends cdk.Stack {
       }],
     });
 
-    // Template SQS queue for client-specific queues (printserver-{clientId})
-    // This queue serves as a template and permissions reference
+    // Template SQS FIFO queue for client-specific queues (printserver-{clientId}.fifo)
+    // This is used only for permissions policy against 'printserver-*' pattern
     const templateQueue = new sqs.Queue(this, 'PrintQueueTemplate', {
-      queueName: 'printserver-template',
+      queueName: 'printserver-template.fifo',
+      fifo: true,
+      contentBasedDeduplication: true,
       visibilityTimeout: cdk.Duration.seconds(300),
       retentionPeriod: cdk.Duration.days(1),
       encryption: sqs.QueueEncryption.SQS_MANAGED,

@@ -166,10 +166,11 @@ function getRegionFromQueueUrl(queueUrl) {
   }
 }
 
-// Client registration function
+// Client registration function (creates FIFO queue)
 async function registerClient(clientId) {
   try {
-    const queueName = `printserver-${clientId}`;
+    // Use FIFO queue for exactly-once + ordering
+    const queueName = `printserver-${clientId}.fifo`;
     console.log(`🔧 Registering client: ${clientId}`);
 
     // Check if queue already exists
@@ -183,6 +184,10 @@ async function registerClient(clientId) {
       await sqsClient.send(new CreateQueueCommand({
         QueueName: queueName,
         Attributes: {
+          // FIFO attributes
+          FifoQueue: 'true',
+          ContentBasedDeduplication: 'true',
+          // Increase if prints can take long
           VisibilityTimeout: '300',
           MessageRetentionPeriod: '604800',
           ReceiveMessageWaitTimeSeconds: '20',
@@ -319,7 +324,7 @@ async function unregisterClient(clientId) {
 
     // Delete the queue
     try {
-      const queueName = `printserver-${clientId}`;
+      const queueName = `printserver-${clientId}.fifo`;
       console.log(`🗑️  Deleting queue: ${queueName}`);
       const queueUrl = await getQueueUrl(queueName);
       await sqsClient.send(new DeleteQueueCommand({ QueueUrl: queueUrl }));
@@ -422,7 +427,7 @@ async function main() {
 
   try {
     // Use client-specific queue: printserver-{clientId}
-    const queueName = `printserver-${CLIENT_ID}`;
+    const queueName = `printserver-${CLIENT_ID}.fifo`;
     const queueUrl = await getQueueUrl(queueName);
     console.log(`📡 Queue: ${queueName}`);
 
