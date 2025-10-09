@@ -19,8 +19,48 @@ const util = require('util');
 const execPromise = util.promisify(exec);
 const argv = require('minimist')(process.argv.slice(2));
 
+// Shared AWS clients for long-running mode
+let sharedSqsClient;
+let sharedS3Client;
+let sharedStsClient;
+
+function getSqsClient(context = {}) {
+  if (context.sqsClient) return context.sqsClient;
+  if (!sharedSqsClient) sharedSqsClient = new SQSClient();
+  return sharedSqsClient;
+}
+
+function getS3Client(context = {}) {
+  if (context.s3Client) return context.s3Client;
+  if (!sharedS3Client) sharedS3Client = new S3Client();
+  return sharedS3Client;
+}
+
+function getStsClient(context = {}) {
+  if (context.stsClient) return context.stsClient;
+  if (!sharedStsClient) sharedStsClient = new STSClient();
+  return sharedStsClient;
+}
+
+function createTemporaryAwsClients({ sqs = false, s3 = false, sts = false } = {}) {
+  const context = {};
+  if (sqs) context.sqsClient = new SQSClient();
+  if (s3) context.s3Client = new S3Client();
+  if (sts) context.stsClient = new STSClient();
+  return context;
+}
+
+function destroyTemporaryAwsClients(context = {}) {
+  if (context.sqsClient && typeof context.sqsClient.destroy === 'function') context.sqsClient.destroy();
+  if (context.s3Client && typeof context.s3Client.destroy === 'function') context.s3Client.destroy();
+  if (context.stsClient && typeof context.stsClient.destroy === 'function') context.stsClient.destroy();
+}
+
 // Upload print job function
 async function uploadPrintJob(filePath, clientId, printerId, printOptions = '') {
+  const context = createTemporaryAwsClients({ s3: true, sts: true });
+  const hadTimerRunning = Boolean(idempotencyCleanupHandle);
+  if (hadTimerRunning) stopIdempotencyCleanupTimer();
   try {
     // Read file
     const fileContent = fs.readFileSync(filePath);
@@ -39,7 +79,7 @@ async function uploadPrintJob(filePath, clientId, printerId, printOptions = '') 
     }
 
     // Upload to S3
-    const bucketName = await getResolvedBucketName();
+    const bucketName = await getResolvedBucketName(context);
     const command = new PutObjectCommand({
       Bucket: bucketName,
       Key: key,
@@ -47,7 +87,7 @@ async function uploadPrintJob(filePath, clientId, printerId, printOptions = '') 
       Metadata: metadata
     });
 
-    await s3Client.send(command);
+    await getS3Client(context).send(command);
 
     console.log(`📤 Uploaded: s3://${bucketName}/${key}`);
     console.log(`🖨️  Printer: ${printerId}`);
@@ -66,6 +106,9 @@ async function uploadPrintJob(filePath, clientId, printerId, printOptions = '') 
       success: false,
       error: error.message,
     };
+  } finally {
+    destroyTemporaryAwsClients(context);
+    if (hadTimerRunning) startIdempotencyCleanupTimer();
   }
 }
 
@@ -102,30 +145,35 @@ const CLIENT_ID = process.env.CLIENT_ID || 'default-client';
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || null; // optional; auto-resolved if not set
 const TEST_MODE = argv.test || process.env.TEST_MODE === 'true';
 
-// AWS Clients
-const sqsClient = new SQSClient();
-const s3Client = new S3Client();
-const stsClient = new STSClient();
-
 // Idempotency cache: track processed S3 keys to prevent duplicate printing
 // Key: S3 object key, Value: timestamp when processed
 const processedKeys = new Map();
 const IDEMPOTENCY_CACHE_DURATION = 3600000; // 1 hour in milliseconds
+let idempotencyCleanupHandle = null;
 
-// Clean up old entries from idempotency cache periodically
-setInterval(() => {
-  const now = Date.now();
-  const expiredKeys = [];
-  for (const [key, timestamp] of processedKeys.entries()) {
-    if (now - timestamp > IDEMPOTENCY_CACHE_DURATION) {
-      expiredKeys.push(key);
+function startIdempotencyCleanupTimer() {
+  if (idempotencyCleanupHandle) return;
+  idempotencyCleanupHandle = setInterval(() => {
+    const now = Date.now();
+    const expiredKeys = [];
+    for (const [key, timestamp] of processedKeys.entries()) {
+      if (now - timestamp > IDEMPOTENCY_CACHE_DURATION) {
+        expiredKeys.push(key);
+      }
     }
+    expiredKeys.forEach(key => processedKeys.delete(key));
+    if (expiredKeys.length > 0) {
+      console.log(`🧹 Cleaned ${expiredKeys.length} expired idempotency entries`);
+    }
+  }, 300000); // Clean every 5 minutes
+}
+
+function stopIdempotencyCleanupTimer() {
+  if (idempotencyCleanupHandle) {
+    clearInterval(idempotencyCleanupHandle);
+    idempotencyCleanupHandle = null;
   }
-  expiredKeys.forEach(key => processedKeys.delete(key));
-  if (expiredKeys.length > 0) {
-    console.log(`🧹 Cleaned ${expiredKeys.length} expired idempotency entries`);
-  }
-}, 300000); // Clean every 5 minutes
+}
 
 // --- Auto bucket resolution helpers ---
 let resolvedBucketNameCache = null;
@@ -140,17 +188,17 @@ async function resolveRegionFromClient(client) {
   }
 }
 
-async function getAccountId() {
-  const res = await stsClient.send(new GetCallerIdentityCommand({}));
+async function getAccountId(context = {}) {
+  const res = await getStsClient(context).send(new GetCallerIdentityCommand({}));
   return res.Account;
 }
 
-async function getResolvedBucketName() {
+async function getResolvedBucketName(context = {}) {
   if (S3_BUCKET_NAME) return S3_BUCKET_NAME;
   if (resolvedBucketNameCache) return resolvedBucketNameCache;
   const [accountId, region] = await Promise.all([
-    getAccountId(),
-    resolveRegionFromClient(s3Client)
+    getAccountId(context),
+    resolveRegionFromClient(getS3Client(context))
   ]);
   const name = `printserver-${accountId}-${region}`;
   resolvedBucketNameCache = name;
@@ -168,6 +216,11 @@ function getRegionFromQueueUrl(queueUrl) {
 
 // Client registration function
 async function registerClient(clientId) {
+  const tempClients = sharedSqsClient || sharedS3Client || sharedStsClient
+    ? { sqsClient: sharedSqsClient, s3Client: sharedS3Client, stsClient: sharedStsClient }
+    : createTemporaryAwsClients({ sqs: true, s3: true, sts: true });
+  const hadTimerRunning = Boolean(idempotencyCleanupHandle);
+  if (hadTimerRunning) stopIdempotencyCleanupTimer();
   try {
     const queueName = `printserver-${clientId}`;
     console.log(`🔧 Registering client: ${clientId}`);
@@ -175,12 +228,11 @@ async function registerClient(clientId) {
     // Check if queue already exists
     let queueUrl;
     try {
-      queueUrl = await getQueueUrl(queueName);
+      queueUrl = await getQueueUrl(queueName, { context: tempClients });
       console.log(`📋 Queue already exists: ${queueName}`);
     } catch (error) {
-      // Queue doesn't exist, create it
       console.log(`📋 Creating queue: ${queueName}`);
-      await sqsClient.send(new CreateQueueCommand({
+      await getSqsClient(tempClients).send(new CreateQueueCommand({
         QueueName: queueName,
         Attributes: {
           VisibilityTimeout: '300',
@@ -188,23 +240,16 @@ async function registerClient(clientId) {
           ReceiveMessageWaitTimeSeconds: '20',
         }
       }));
-
-      // Wait a moment for the queue to be fully created
       await new Promise(resolve => setTimeout(resolve, 2000));
-
-      queueUrl = await getQueueUrl(queueName);
+      queueUrl = await getQueueUrl(queueName, { context: tempClients });
     }
 
-    // Get the queue ARN for S3 notifications
     const urlParts = queueUrl.split('/');
     const accountId = urlParts[urlParts.length - 2];
-    const queueRegion = getRegionFromQueueUrl(queueUrl) || await resolveRegionFromClient(sqsClient);
+    const queueRegion = getRegionFromQueueUrl(queueUrl) || await resolveRegionFromClient(getSqsClient(tempClients));
     const queueArn = `arn:aws:sqs:${queueRegion}:${accountId}:${queueName}`;
-    console.log(`🔗 Queue ARN: ${queueArn}`);
 
-    // Set queue policy to allow S3 to send messages
-    console.log(`🔐 Setting queue policy...`);
-    await sqsClient.send(new SetQueueAttributesCommand({
+    await getSqsClient(tempClients).send(new SetQueueAttributesCommand({
       QueueUrl: queueUrl,
       Attributes: {
         Policy: JSON.stringify({
@@ -216,7 +261,7 @@ async function registerClient(clientId) {
               Action: 'sqs:SendMessage',
               Resource: queueArn,
               Condition: {
-                ArnEquals: { 'aws:SourceArn': `arn:aws:s3:::${await getResolvedBucketName()}` }
+                ArnEquals: { 'aws:SourceArn': `arn:aws:s3:::${await getResolvedBucketName(tempClients)}` }
               }
             }
           ]
@@ -224,51 +269,41 @@ async function registerClient(clientId) {
       }
     }));
 
-    // Wait a moment for the policy to propagate
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    // Configure S3 bucket notifications
-    console.log(`📡 Configuring S3 bucket notifications...`);
-    const currentNotifications = await s3Client.send(new GetBucketNotificationConfigurationCommand({
-      Bucket: await getResolvedBucketName()
+    const currentNotifications = await getS3Client(tempClients).send(new GetBucketNotificationConfigurationCommand({
+      Bucket: await getResolvedBucketName(tempClients)
     }));
 
-    // Check if notification already exists
     const existingNotification = (currentNotifications.QueueConfigurations || []).find(
       config => config.Id === `PrintServer-${clientId}`
     );
 
-    if (existingNotification) {
-      console.log(`⚠️  S3 notification already exists for ${clientId}, skipping...`);
-    } else {
-      const newNotification = {
-        Id: `PrintServer-${clientId}`,
-        QueueArn: queueArn,
-        Events: ['s3:ObjectCreated:*'],
-        Filter: {
-          Key: {
-            FilterRules: [{
-              Name: 'prefix',
-              Value: `clients/${clientId}/`
-            }]
-          }
-        }
-      };
-
+    if (!existingNotification) {
       const updatedNotifications = {
         ...currentNotifications,
         QueueConfigurations: [
           ...(currentNotifications.QueueConfigurations || []),
-          newNotification
+          {
+            Id: `PrintServer-${clientId}`,
+            QueueArn: queueArn,
+            Events: ['s3:ObjectCreated:*'],
+            Filter: {
+              Key: {
+                FilterRules: [{ Name: 'prefix', Value: `clients/${clientId}/` }]
+              }
+            }
+          }
         ]
       };
 
-      await s3Client.send(new PutBucketNotificationConfigurationCommand({
-        Bucket: await getResolvedBucketName(),
+      await getS3Client(tempClients).send(new PutBucketNotificationConfigurationCommand({
+        Bucket: await getResolvedBucketName(tempClients),
         NotificationConfiguration: updatedNotifications
       }));
-
       console.log(`✅ S3 notification configured for ${clientId}`);
+    } else {
+      console.log(`⚠️  S3 notification already exists for ${clientId}, skipping...`);
     }
 
     console.log(`✅ Client registered successfully: ${clientId}`);
@@ -282,21 +317,27 @@ async function registerClient(clientId) {
     console.error('   - Queue creation delays');
     console.error('   - S3 notification conflicts');
     console.error('   - Try again in a few moments');
-    process.exit(1);
+  } finally {
+    if (!sharedSqsClient && !sharedS3Client && !sharedStsClient) {
+      destroyTemporaryAwsClients(tempClients);
+    }
+    if (hadTimerRunning) startIdempotencyCleanupTimer();
   }
 }
 
-// Unregister client function
 async function unregisterClient(clientId) {
+  const tempClients = sharedSqsClient || sharedS3Client || sharedStsClient
+    ? { sqsClient: sharedSqsClient, s3Client: sharedS3Client, stsClient: sharedStsClient }
+    : createTemporaryAwsClients({ sqs: true, s3: true, sts: true });
+  const hadTimerRunning = Boolean(idempotencyCleanupHandle);
+  if (hadTimerRunning) stopIdempotencyCleanupTimer();
   try {
     console.log(`🔧 Unregistering client: ${clientId}`);
 
-    // Get current bucket notifications
-    const currentNotifications = await s3Client.send(new GetBucketNotificationConfigurationCommand({
-      Bucket: await getResolvedBucketName()
+    const currentNotifications = await getS3Client(tempClients).send(new GetBucketNotificationConfigurationCommand({
+      Bucket: await getResolvedBucketName(tempClients)
     }));
 
-    // Remove the notification for this client
     const updatedNotifications = {
       ...currentNotifications,
       QueueConfigurations: (currentNotifications.QueueConfigurations || []).filter(config =>
@@ -308,8 +349,8 @@ async function unregisterClient(clientId) {
 
     if (removedCount > 0) {
       console.log(`📡 Removing S3 notification for ${clientId}...`);
-      await s3Client.send(new PutBucketNotificationConfigurationCommand({
-        Bucket: await getResolvedBucketName(),
+      await getS3Client(tempClients).send(new PutBucketNotificationConfigurationCommand({
+        Bucket: await getResolvedBucketName(tempClients),
         NotificationConfiguration: updatedNotifications
       }));
       console.log(`✅ Removed ${removedCount} S3 notification(s)`);
@@ -317,16 +358,15 @@ async function unregisterClient(clientId) {
       console.log(`⚠️  No S3 notification found for ${clientId}`);
     }
 
-    // Delete the queue
     try {
       const queueName = `printserver-${clientId}`;
       console.log(`🗑️  Deleting queue: ${queueName}`);
-      const queueUrl = await getQueueUrl(queueName);
-      await sqsClient.send(new DeleteQueueCommand({ QueueUrl: queueUrl }));
+      const queueUrl = await getQueueUrl(queueName, { context: tempClients });
+      await getSqsClient(tempClients).send(new DeleteQueueCommand({ QueueUrl: queueUrl }));
       console.log(`✅ Queue deleted: ${queueName}`);
     } catch (queueError) {
       if (queueError.name === 'QueueDoesNotExist') {
-        console.log(`⚠️  Queue ${queueName} does not exist (already deleted)`);
+        console.log(`⚠️  Queue printserver-${clientId} does not exist (already deleted)`);
       } else {
         console.log(`⚠️  Could not delete queue: ${queueError.message}`);
       }
@@ -340,7 +380,11 @@ async function unregisterClient(clientId) {
     console.error('   - AWS permissions issues');
     console.error('   - Resource already deleted');
     console.error('   - Try checking AWS console manually');
-    process.exit(1);
+  } finally {
+    if (!sharedSqsClient && !sharedS3Client && !sharedStsClient) {
+      destroyTemporaryAwsClients(tempClients);
+    }
+    if (hadTimerRunning) startIdempotencyCleanupTimer();
   }
 }
 
@@ -403,13 +447,11 @@ async function main() {
         console.log(`📄 S3 Key: ${result.key}`);
       } else {
         console.error('❌ Upload failed:', result.error);
-        process.exit(1);
       }
     } catch (error) {
       console.error('❌ Upload error:', error.message);
-      process.exit(1);
     }
-    return;
+    return; // Unreachable because of process.exit, kept for clarity
   }
 
   // Normal polling mode
@@ -425,6 +467,8 @@ async function main() {
     const queueName = `printserver-${CLIENT_ID}`;
     const queueUrl = await getQueueUrl(queueName);
     console.log(`📡 Queue: ${queueName}`);
+
+    startIdempotencyCleanupTimer();
 
     // Process any messages available at startup
     await drainVisibleMessages(queueUrl);
@@ -487,20 +531,19 @@ async function main() {
 
   } catch (error) {
     console.error('💥 Failed to start client:', error.message);
-    process.exit(1);
   }
 }
 
-async function getQueueUrl(queueName) {
+async function getQueueUrl(queueName, options = { createIfMissing: true, context: {} }) {
   try {
     const command = new GetQueueUrlCommand({
       QueueName: queueName
     });
 
-    const response = await sqsClient.send(command);
+    const response = await getSqsClient(options.context).send(command);
     return response.QueueUrl;
   } catch (error) {
-    if (error.name === 'QueueDoesNotExist') {
+    if (error.name === 'QueueDoesNotExist' && options.createIfMissing) {
       console.log(`Queue '${queueName}' does not exist. Creating it now...`);
       try {
         const createQueueCommand = new CreateQueueCommand({
@@ -512,7 +555,7 @@ async function getQueueUrl(queueName) {
           }
         });
 
-        const response = await sqsClient.send(createQueueCommand);
+        const response = await getSqsClient(options.context).send(createQueueCommand);
         console.log(`✅ Created queue: ${queueName}`);
         return response.QueueUrl;
       } catch (createError) {
@@ -526,7 +569,7 @@ async function getQueueUrl(queueName) {
 
 async function checkQueueStatus(queueUrl) {
   try {
-    const response = await sqsClient.send(new GetQueueAttributesCommand({
+    const response = await getSqsClient().send(new GetQueueAttributesCommand({
       QueueUrl: queueUrl,
       AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
     }));
@@ -549,7 +592,7 @@ async function receiveMessages(queueUrl) {
     AttributeNames: ['ApproximateReceiveCount', 'SentTimestamp']
   });
 
-  const response = await sqsClient.send(command);
+  const response = await getSqsClient().send(command);
   const messages = response.Messages || [];
 
   return messages;
@@ -560,7 +603,7 @@ async function drainVisibleMessages(queueUrl) {
   let totalProcessed = 0;
 
   while (true) {
-    const response = await sqsClient.send(new ReceiveMessageCommand({
+    const response = await getSqsClient().send(new ReceiveMessageCommand({
       QueueUrl: queueUrl,
       MaxNumberOfMessages: 10,
       WaitTimeSeconds: 0,
@@ -604,7 +647,7 @@ function parseSqsMessage(message) {
 async function fetchS3DataAndDownload(bucket, key) {
   const filename = path.basename(key);
   const localFilePath = path.join(TMP_DIR, filename);
-  const getResponse = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const getResponse = await getS3Client().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
 
   // Extract metadata
   const printerId = getResponse.Metadata?.['printer'] || 'unknown';
@@ -927,7 +970,7 @@ async function deleteMessage(queueUrl, receiptHandle) {
     ReceiptHandle: receiptHandle,
   });
 
-  await sqsClient.send(command);
+  await getSqsClient().send(command);
 }
 
 function sleep(ms) {
